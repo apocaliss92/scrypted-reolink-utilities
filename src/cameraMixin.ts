@@ -4,7 +4,7 @@ import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import keyBy from "lodash/keyBy";
 import HikvisionVideoclipssProvider from "./main";
 import { ReolinkCameraClient } from "./client";
-import { overlayId } from "./utils";
+import { overlayId, overlayPositions, pluginEnabledFilter } from "./utils";
 import { getOverlayKeys, getOverlay, getOverlaySettings, updateCameraConfigurationRegex, SupportedDevice, OverlayType } from "../../scrypted-hikvision-utilities/src/utils";
 
 export default class HikvisionUtilitiesMixin extends SettingsMixinDeviceBase<any> implements Settings {
@@ -19,9 +19,18 @@ export default class HikvisionUtilitiesMixin extends SettingsMixinDeviceBase<any
             type: 'number',
             defaultValue: 10
         },
-        getCurrentOverlayConfigurations: {
-            title: 'Get current overlay configurations',
-            type: 'button',
+        overlayPosition: {
+            title: 'Overlay position',
+            type: 'string',
+            choices: overlayPositions,
+            defaultValue: overlayPositions[0],
+        },
+        duplicateFromDevice: {
+            title: 'Duplicate from device',
+            description: 'Duplicate OSD information from another devices enabled on the plugin',
+            type: 'device',
+            deviceFilter: pluginEnabledFilter,
+            immediate: true,
         },
     });
 
@@ -72,16 +81,43 @@ export default class HikvisionUtilitiesMixin extends SettingsMixinDeviceBase<any
     async getMixinSettings(): Promise<Setting[]> {
         const settings = await this.storageSettings.getSettings();
 
-        settings.push(...getOverlaySettings({ storage: this.storageSettings, overlayIds: [overlayId] }));
+        settings.push(...getOverlaySettings({ storage: this.storageSettings, overlayIds: [overlayId] })
+            .map(item => {
+                const { subgroup, ...rest } = item;
+                return rest;
+            }));
 
         return settings;
+    }
+
+    async duplicateFromDevice(deviceId: string) {
+        const deviceToDuplicate = this.plugin.mixinsMap[deviceId];
+
+        if (deviceToDuplicate) {
+            const duplicateClient = await deviceToDuplicate.getClient();
+            const osd = await duplicateClient.getOsd();
+
+            const client = await this.getClient();
+            await client.setOsd(osd);
+            await this.getOverlayData();
+
+            const overlayPosition = deviceToDuplicate.storageSettings.values.overlayPosition;
+            const { device, type, prefix, text } = getOverlay({ overlayId, storage: deviceToDuplicate.storageSettings });
+            const { deviceKey, typeKey, prefixKey, textKey } = getOverlayKeys(overlayId);
+
+            await this.putMixinSetting(deviceKey, device);
+            await this.putMixinSetting(typeKey, type);
+            await this.putMixinSetting(prefixKey, prefix);
+            await this.putMixinSetting(textKey, text);
+            await this.putMixinSetting('overlayPosition', overlayPosition);
+        }
     }
 
     async putMixinSetting(key: string, value: string) {
         const updateCameraConfigurations = updateCameraConfigurationRegex.exec(key);
 
-        if (key === 'getCurrentOverlayConfigurations') {
-            await this.getOverlayData();
+        if (key === 'duplicateFromDevice') {
+            await this.duplicateFromDevice(value);
         } else if (updateCameraConfigurations) {
             const overlayId = updateCameraConfigurations[1];
             await this.updateOverlayData(overlayId);
@@ -101,6 +137,16 @@ export default class HikvisionUtilitiesMixin extends SettingsMixinDeviceBase<any
     async updateOverlayData(overlayId: string) {
         const client = await this.getClient();
         const { device, type, prefix, text } = getOverlay({ overlayId, storage: this.storageSettings });
+
+        const osd = await client.getOsd();
+
+        if (!osd.value) {
+            return;
+        }
+
+        osd.value.Osd.osdChannel.enable = 1;
+        osd.value.Osd.osdChannel.pos = this.storageSettings.values.overlayPosition;
+        await client.setOsd(osd);
 
         let textToUpdate = text;
         if (type === OverlayType.Device && device) {
@@ -145,8 +191,6 @@ export default class HikvisionUtilitiesMixin extends SettingsMixinDeviceBase<any
     }
 
     async init() {
-        await this.getOverlayData();
-
         setInterval(async () => {
             const overlay = getOverlay({
                 overlayId,
@@ -161,6 +205,7 @@ export default class HikvisionUtilitiesMixin extends SettingsMixinDeviceBase<any
                 this.checkEventListeners({ faceEnabled: true });
             }
 
+            await this.getOverlayData();
         }, this.storageSettings.values.updateInterval * 1000);
     }
 }

@@ -3,6 +3,7 @@ import { AuthFetchCredentialState, authHttpFetch } from '@scrypted/common/src/ht
 import { PassThrough, Readable } from 'stream';
 import { HttpFetchOptions } from '../../scrypted/server/src/fetch/http-fetch';
 import { getLoginParameters } from '../../scrypted/plugins/reolink/src/probe';
+import { Osd } from './utils';
 
 export interface LoginData {
     tokenLease: number;
@@ -160,6 +161,58 @@ export class ReolinkCameraClient {
         if (error) {
             this.console.error('error during call to setDeviceName', error);
         }
+    }
 
+    async getOsd() {
+        const url = new URL(`http://${this.host}/api.cgi`);
+
+        const body = [
+            {
+                cmd: "GetOsd",
+                action: 1,
+                param: { channel: this.channelId }
+            },
+        ];
+
+        const response = await this.requestWithLogin({
+            url,
+            responseType: 'json',
+            method: 'POST',
+        }, this.createReadable(body));
+
+        const error = response.body?.find(elem => elem.error)?.error;
+        if (error) {
+            this.console.error('error during call to getOsd', error);
+        }
+
+        return response.body?.[0] as Osd;
+    }
+
+    async setOsd(osd: Osd) {
+        const url = new URL(`http://${this.host}/api.cgi`);
+
+        const body = [
+            {
+                cmd: "SetOsd",
+                param: {
+                    Osd: {
+                        channel: this.channelId,
+                        osdChannel: osd.value.Osd.osdChannel,
+                        osdTime: osd.value.Osd.osdTime,
+                    }
+                }
+            }
+        ];
+
+        const response = await this.requestWithLogin({
+            url,
+            responseType: 'json',
+            method: 'POST',
+        }, this.createReadable(body));
+
+        const error = response.body?.find(elem => elem.error)?.error;
+        if (error) {
+            this.console.error('error during call to getOsd', error);
+        }
     }
 }
