@@ -1,24 +1,19 @@
-import sdk, { EventListenerRegister, ObjectsDetected, ScryptedInterface, Setting, Settings } from "@scrypted/sdk";
+import sdk, { EventListenerRegister, ObjectsDetected, ScryptedDeviceBase, ScryptedInterface, Setting, Settings } from "@scrypted/sdk";
 import { SettingsMixinDeviceBase, SettingsMixinDeviceOptions } from "@scrypted/sdk/settings-mixin";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import keyBy from "lodash/keyBy";
 import HikvisionVideoclipssProvider from "./main";
 import { ReolinkCameraClient } from "./client";
 import { overlayId, overlayPositions, pluginEnabledFilter } from "./utils";
-import { getOverlayKeys, getOverlay, getOverlaySettings, updateCameraConfigurationRegex, SupportedDevice, OverlayType } from "../../scrypted-hikvision-utilities/src/utils";
+import { getOverlayKeys, getOverlay, getOverlaySettings, SupportedDevice, OverlayType, ListenersMap, ListenerType, OnUpdateOverlayFn, parseOverlayData, listenersIntevalFn } from "../../scrypted-hikvision-utilities/src/utils";
 
 export default class HikvisionUtilitiesMixin extends SettingsMixinDeviceBase<any> implements Settings {
     client: ReolinkCameraClient;
     killed: boolean;
-    lastFaceDetected: string;
-    detectionListener: EventListenerRegister;
+    listenersMap: ListenersMap = {};
+    checkInterval: NodeJS.Timeout;
 
     storageSettings = new StorageSettings(this, {
-        updateInterval: {
-            title: 'Update interval in seconds',
-            type: 'number',
-            defaultValue: 10
-        },
         overlayPosition: {
             title: 'Overlay position',
             type: 'string',
@@ -45,8 +40,19 @@ export default class HikvisionUtilitiesMixin extends SettingsMixinDeviceBase<any
         }, 2000);
     }
 
+    removeListeners() {
+        try {
+            Object.values(this.listenersMap).forEach(({ listener }) => listener && listener.removeListener());
+            this.checkInterval && clearInterval(this.checkInterval);
+            this.checkInterval = undefined;
+        } catch (e) {
+            this.console.error('Error in removeListeners', e);
+        }
+    }
+
     async release() {
         this.killed = true;
+        this.removeListeners();
     }
 
     async getDeviceProperties() {
@@ -114,13 +120,8 @@ export default class HikvisionUtilitiesMixin extends SettingsMixinDeviceBase<any
     }
 
     async putMixinSetting(key: string, value: string) {
-        const updateCameraConfigurations = updateCameraConfigurationRegex.exec(key);
-
         if (key === 'duplicateFromDevice') {
             await this.duplicateFromDevice(value);
-        } else if (updateCameraConfigurations) {
-            const overlayId = updateCameraConfigurations[1];
-            await this.updateOverlayData(overlayId);
         } else {
             this.storage.setItem(key, typeof value === 'string' ? value : JSON.stringify(value));
         }
@@ -134,78 +135,75 @@ export default class HikvisionUtilitiesMixin extends SettingsMixinDeviceBase<any
         this.storageSettings.putSetting(textKey, deviceName);
     }
 
-    async updateOverlayData(overlayId: string) {
-        const client = await this.getClient();
-        const { device, type, prefix, text } = getOverlay({ overlayId, storage: this.storageSettings });
 
-        const osd = await client.getOsd();
+    private updateOverlayData: OnUpdateOverlayFn = async (props: {
+        overlayId: string,
+        listenerType: ListenerType,
+        listenInterface: ScryptedInterface,
+        data?: any,
+        device: ScryptedDeviceBase
+    }) => {
+        const { overlayId, listenerType, data, device } = props;
+        this.console.log(`Update received from device ${device.name} ${JSON.stringify({
+            overlayId,
+            listenerType,
+            data
+        })}`);
 
-        if (!osd.value) {
-            return;
-        }
+        try {
+            const client = await this.getClient();
+            const osd = await client.getOsd();
 
-        osd.value.Osd.osdChannel.enable = 1;
-        osd.value.Osd.osdChannel.pos = this.storageSettings.values.overlayPosition;
-        await client.setOsd(osd);
+            osd.value.Osd.osdChannel.enable = 1;
+            osd.value.Osd.osdChannel.pos = this.storageSettings.values.overlayPosition;
+            await client.setOsd(osd);
 
-        let textToUpdate = text;
-        if (type === OverlayType.Device && device) {
-            const realDevice = sdk.systemManager.getDeviceById<SupportedDevice>(device);
-            if (realDevice) {
-                if (realDevice.interfaces.includes(ScryptedInterface.Thermometer)) {
-                    textToUpdate = `${prefix || ''}${Number(realDevice.temperature.toFixed(0))} ${realDevice.temperatureUnit}`;
-                } else if (realDevice.interfaces.includes(ScryptedInterface.HumiditySensor)) {
-                    textToUpdate = `${prefix || ''}${realDevice.humidity} %`;
-                }
-            }
-        } else if (type === OverlayType.FaceDetection) {
-            textToUpdate = `${prefix || ''}${this.lastFaceDetected || '-'}`;
-        }
-
-        await client.setDeviceName(textToUpdate);
-    }
-
-    checkEventListeners(props: {
-        faceEnabled: boolean
-    }) {
-        const { faceEnabled } = props;
-
-        if (faceEnabled) {
-            if (!this.detectionListener) {
-                this.console.log('Starting Object detection for faces');
-                this.detectionListener = sdk.systemManager.listenDevice(this.id, ScryptedInterface.ObjectDetector, async (_, __, data) => {
-                    const detection: ObjectsDetected = data;
-
-                    const faceLabel = detection.detections.find(det => det.className === 'face' && det.label)?.label;
-                    if (faceLabel) {
-                        this.console.log(`Face detected: ${faceLabel}`);
-                        this.lastFaceDetected = faceLabel;
+            const overlay = getOverlay({ overlayId, storage: this.storageSettings });
+            const textToUpdate = parseOverlayData({
+                data,
+                listenerType,
+                overlay,
+                parseNumber: (input: number) => {
+                    let output = input;
+                    if (output < 0) {
+                        output = 0;
                     }
-                });
+
+                    return output.toFixed(0);
+                }
+            });
+
+            if (textToUpdate) {
+                await client.setDeviceName(textToUpdate);
             }
-        } else if (this.detectionListener) {
-            this.console.log('Stopping Object detection for faces');
-            this.detectionListener && this.detectionListener.removeListener();
-            this.detectionListener = undefined;
+        } catch (e) {
+            this.console.error('Error in updateOverlayData', e);
         }
     }
 
     async init() {
-        setInterval(async () => {
-            const overlay = getOverlay({
-                overlayId,
-                storage: this.storageSettings
-            });
+        try {
+            const funct = async () => {
+                try {
+                    this.listenersMap = listenersIntevalFn({
+                        console: this.console,
+                        currentListeners: this.listenersMap,
+                        id: this.id,
+                        onUpdateFn: this.updateOverlayData,
+                        overlayIds: [overlayId],
+                        storage: this.storageSettings,
+                    });
+                    await this.getOverlayData();
+                } catch (e) {
+                    this.console.error('Error in init interval', e);
+                }
 
-            if (overlay.type !== OverlayType.Text) {
-                await this.updateOverlayData(overlayId);
-            }
+            };
 
-            if (overlay.type === OverlayType.FaceDetection) {
-                this.checkEventListeners({ faceEnabled: true });
-            }
-
-            await this.getOverlayData();
-        }, this.storageSettings.values.updateInterval * 1000);
+            this.checkInterval = setInterval(funct, 10 * 1000);
+            await funct();
+        } catch (e) {
+            this.console.error('Error in init', e);
+        }
     }
 }
