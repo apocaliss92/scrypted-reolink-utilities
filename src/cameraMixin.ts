@@ -105,16 +105,14 @@ export default class HikvisionUtilitiesMixin extends SettingsMixinDeviceBase<any
 
             const client = await this.getClient();
             await client.setOsd(osd);
-            await this.getOverlayData();
 
             const overlayPosition = deviceToDuplicate.storageSettings.values.overlayPosition;
-            const { device, type, prefix, text } = getOverlay({ overlayId, storage: deviceToDuplicate.storageSettings });
-            const { deviceKey, typeKey, prefixKey, textKey } = getOverlayKeys(overlayId);
+            const { device, type, prefix } = getOverlay({ overlayId, storage: deviceToDuplicate.storageSettings });
+            const { deviceKey, typeKey, prefixKey } = getOverlayKeys(overlayId);
 
             await this.putMixinSetting(deviceKey, device);
             await this.putMixinSetting(typeKey, type);
             await this.putMixinSetting(prefixKey, prefix);
-            await this.putMixinSetting(textKey, text);
             await this.putMixinSetting('overlayPosition', overlayPosition);
         }
     }
@@ -127,24 +125,9 @@ export default class HikvisionUtilitiesMixin extends SettingsMixinDeviceBase<any
         }
     }
 
-    async getOverlayData() {
-        const client = await this.getClient();
-        const deviceName = await client.getDeviceName();
-
-        const { textKey } = getOverlayKeys(overlayId);
-        this.storageSettings.putSetting(textKey, deviceName);
-    }
-
-
-    private updateOverlayData: OnUpdateOverlayFn = async (props: {
-        overlayId: string,
-        listenerType: ListenerType,
-        listenInterface: ScryptedInterface,
-        data?: any,
-        device: ScryptedDeviceBase
-    }) => {
+    private updateOverlayData: OnUpdateOverlayFn = async (props) => {
         const { overlayId, listenerType, data, device } = props;
-        this.console.log(`Update received from device ${device.name} ${JSON.stringify({
+        this.console.log(`Update received from device ${device?.name} ${JSON.stringify({
             overlayId,
             listenerType,
             data
@@ -193,7 +176,6 @@ export default class HikvisionUtilitiesMixin extends SettingsMixinDeviceBase<any
                         overlayIds: [overlayId],
                         storage: this.storageSettings,
                     });
-                    await this.getOverlayData();
                 } catch (e) {
                     this.console.error('Error in init interval', e);
                 }
